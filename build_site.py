@@ -60,21 +60,44 @@ big = ev[ev.drop_pts >= 6]
 by_sport = pd.DataFrame([dict(sport=s, **stats(big[big.sport == s])) for s in ORDER])
 head = stats(big)
 
-# backtest grid: sport x threshold, with chronological holdout
+# backtest grid: sport x threshold x direction, with chronological holdout
+THRS = (6, 10, 15)
+SIDES = {"fade": "Bet against the dropped team", "back": "Back the dropped team"}
+
+
+def side_pnl(df, side, fee=0.07, slip=0.01):
+    """Buy one side at the start price + 1 cent, paying Kalshi's taker fee. Returns (profit, cost) per $1 contract."""
+    p = (1 - df.price_start) if side == "fade" else df.price_start
+    y = (1 - df.won) if side == "fade" else df.won
+    a = (p + slip).clip(upper=0.99)
+    f = fee * a * (1 - a)
+    return y - a - f, a + f
+
+
+def side_roi(df, side):
+    pnl, cost = side_pnl(df, side)
+    return pnl.sum() / cost.sum() if len(df) else np.nan
+
+
 bt = []
-for s in ORDER:
-    for thr in (6, 10, 15):
-        d = ev[(ev.sport == s) & (ev.drop_pts >= thr)].sort_values("game_date_et")
+for s_ in ORDER:
+    for thr in THRS:
+        d = ev[(ev.sport == s_) & (ev.drop_pts >= thr)].sort_values("game_date_et")
         if len(d) < 15:
             continue
         cut = d.game_date_et.quantile(0.6)
-        bt.append(dict(sport=s, thr=thr, n=len(d), roi=fade_roi(d),
-                       first=fade_roi(d[d.game_date_et <= cut]), last=fade_roi(d[d.game_date_et > cut])))
+        for side in SIDES:
+            bt.append(dict(sport=s_, thr=thr, side=side, n=len(d), roi=side_roi(d, side),
+                           first=side_roi(d[d.game_date_et <= cut], side), last=side_roi(d[d.game_date_et > cut], side)))
 bt = pd.DataFrame(bt)
+MIN_BETS = 50
+best = bt[bt.n >= MIN_BETS].sort_values("roi", ascending=False).iloc[0]
+best_label = f"{best.sport}, drop {int(best.thr)}+, {SIDES[best.side].lower()}"
 
-# late moves (final 24h) need price_24h
+# edge by sport at each drop level (all pre-game moves, and final-24h moves)
+edge_lv = pd.DataFrame([dict(sport=s_, thr=t, **stats(ev[(ev.sport == s_) & (ev.drop_pts >= t)]))
+                        for s_ in ORDER for t in THRS if ((ev.sport == s_) & (ev.drop_pts >= t)).sum() >= 10])
 g24 = ev[ev.price_24h.between(0.02, 0.98)].copy()
-# re-orient on the 24h -> start move
 down = g24.price_start < g24.price_24h
 late = pd.DataFrame({"sport": g24.sport,
                      "price_ref": np.where(down, g24.price_24h, 1 - g24.price_24h),
@@ -82,8 +105,23 @@ late = pd.DataFrame({"sport": g24.sport,
                      "won": np.where(down, g24.won, 1 - g24.won)})
 late["drop_pts"] = ((late.price_ref - late.price_start) * 100).round(6)
 late["roi_back_marked_down"] = 0.0
-late = late[late.drop_pts >= 5]
-late_sport = pd.DataFrame([dict(sport=s, **stats(late[late.sport == s])) for s in ORDER if (late.sport == s).sum() >= 10])
+late_lv = pd.DataFrame([dict(sport=s_, thr=t, **stats(late[(late.sport == s_) & (late.drop_pts >= t)]))
+                        for s_ in ORDER for t in THRS if ((late.sport == s_) & (late.drop_pts >= t)).sum() >= 10])
+
+# sample portfolio: $100 on the best rule, 5% of the current bankroll per bet, in date order
+START, STAKE = 100.0, 0.05
+pd_best = ev[(ev.sport == best.sport) & (ev.drop_pts >= best.thr)].sort_values("game_date_et").reset_index(drop=True)
+_pnl, _cost = side_pnl(pd_best, best.side)
+bank, path_ = START, []
+for pr, co in zip(_pnl, _cost):
+    stake = bank * STAKE
+    bank += stake * pr / co
+    path_.append(bank)
+pd_best["bankroll"] = path_
+peak = pd_best.bankroll.cummax()
+port = dict(final=bank, bets=len(pd_best), wins=int(((1 - pd_best.won) if best.side == "fade" else pd_best.won).sum()),
+            max_dd=((pd_best.bankroll - peak) / peak).min(), first=pd_best.game_date_et.min(), last=pd_best.game_date_et.max())
+cut_date = pd_best.game_date_et.quantile(0.6)
 
 # calibration (all games)
 g = games[games.price_start.between(0.02, 0.98)].copy()
@@ -127,46 +165,78 @@ def html_fig(fig, div_id):
                        config={"displayModeBar": False, "responsive": True})
 
 
-f_edge = dot_ci(by_sport, "edge", "lo", "hi", 0, lambda v: f"{v:+.1f}", "Win rate minus price at start (points)",
-                label=lambda r: f"{r.sport} ({r.n:,})")
-f_late = dot_ci(late_sport, "edge", "lo", "hi", 0, lambda v: f"{v:+.1f}", "Win rate minus price at start (points)",
-                label=lambda r: f"{r.sport} ({r.n:,})")
+LV_COLORS = {6: "#94a3b8", 10: ACCENT2, 15: ACCENT}
 
-# backtest bars with threshold buttons
+
+def dot_levels(df, xtitle, highlight=None):
+    """Edge by sport, one marker per drop level, 95% intervals. highlight=(sport, thr) draws a ring."""
+    sports = [s_ for s_ in ORDER if s_ in set(df.sport)][::-1]
+    ypos = {s_: i for i, s_ in enumerate(sports)}
+    off = {6: 0.24, 10: 0.0, 15: -0.24}
+    fig = go.Figure()
+    for t in THRS:
+        d = df[df.thr == t]
+        y = [ypos[s_] + off[t] for s_ in d.sport]
+        fig.add_trace(go.Scatter(
+            x=d.edge, y=y, mode="markers", name=f"Drop {t}+", marker=dict(size=10, color=LV_COLORS[t]),
+            error_x=dict(type="data", symmetric=False, array=d.hi - d.edge, arrayminus=d.edge - d.lo, color=LV_COLORS[t], thickness=1.5, width=0),
+            customdata=np.stack([d.sport, d.n, d.win * 100, d.p_start * 100, d.p], axis=1),
+            hovertemplate=f"<b>%{{customdata[0]}}, drop {t}+</b><br>%{{customdata[1]:,}} teams<br>Won %{{customdata[2]:.1f}}% vs priced %{{customdata[3]:.1f}}%"
+                          "<br>p = %{customdata[4]:.3f}<extra></extra>"))
+    if highlight is not None:
+        h = df[(df.sport == highlight[0]) & (df.thr == highlight[1])]
+        if len(h):
+            fig.add_trace(go.Scatter(x=h.edge, y=[ypos[highlight[0]] + off[highlight[1]]], mode="markers+text",
+                                     marker=dict(size=22, color="rgba(0,0,0,0)", line=dict(color=INK, width=2.5)),
+                                     text=["  Best ROI rule"], textposition="middle right", textfont=dict(size=12, color=INK),
+                                     hoverinfo="skip", showlegend=False, cliponaxis=False))
+    fig.add_vline(x=0, line_dash="dash", line_color=MUTED)
+    base_layout(fig, height=90 + 58 * len(sports), showlegend=True, legend=dict(orientation="h", y=1.08, x=0))
+    fig.update_yaxes(tickvals=list(ypos.values()), ticktext=list(ypos.keys()), range=[-0.6, len(sports) - 0.4], showgrid=False)
+    fig.update_xaxes(title=xtitle)
+    return fig
+
+
+hl = (best.sport, int(best.thr))
+f_edge = dot_levels(edge_lv, "Win rate minus price at start (points)", hl)
+f_late = dot_levels(late_lv, "Win rate minus price at start (points)")
+
+# backtest: all three drop levels at once, toggle the bet direction, outline the best rule
 f_bt = go.Figure()
-thr_list = [6, 10, 15]
-for i, thr in enumerate(thr_list):
-    d = bt[bt.thr == thr].set_index("sport").reindex(ORDER).dropna(subset=["n"])
-    f_bt.add_trace(go.Bar(x=d.index, y=d.roi * 100, visible=(i == 0),
-                          marker_color=[GOOD if v > 0 else BAD for v in d.roi], name=f"{thr}+",
-                          customdata=np.stack([d.n, d["first"] * 100, d["last"] * 100], axis=1),
-                          text=[f"{v:+.1f}%" for v in d.roi * 100], textposition="outside", cliponaxis=False,
-                          hovertemplate="<b>%{x}</b><br>%{customdata[0]:,} bets<br>ROI %{y:+.1f}%"
-                                        "<br>First 60%: %{customdata[1]:+.1f}%<br>Last 40%: %{customdata[2]:+.1f}%<extra></extra>"))
-base_layout(f_bt, height=380)
-f_bt.update_yaxes(title="ROI per dollar staked (%)", zeroline=True)
-f_bt.update_layout(margin=dict(t=50), updatemenus=[dict(
-    type="buttons", direction="right", x=0, y=1.16, xanchor="left", showactive=True,
+traces_per_side = len(THRS)
+for si, side in enumerate(SIDES):
+    for t in THRS:
+        d = bt[(bt.side == side) & (bt.thr == t)].set_index("sport").reindex(ORDER).dropna(subset=["n"])
+        is_best = [(sp == best.sport and t == best.thr and side == best.side) for sp in d.index]
+        f_bt.add_trace(go.Bar(
+            x=d.index, y=d.roi * 100, name=f"Drop {t}+", visible=(side == best.side), offsetgroup=str(t),
+            marker=dict(color=LV_COLORS[t], line=dict(color=[INK if b_ else "rgba(0,0,0,0)" for b_ in is_best],
+                                                      width=[4 if b_ else 0 for b_ in is_best])),
+            text=[("★ " if b_ else "") + f"{v:+.1f}%" for v, b_ in zip(d.roi * 100, is_best)], textposition="outside",
+            cliponaxis=False, textfont=dict(size=11),
+            customdata=np.stack([d.n, d["first"] * 100, d["last"] * 100], axis=1),
+            hovertemplate=f"<b>%{{x}}, drop {t}+</b><br>{SIDES[side]}<br>%{{customdata[0]:,}} bets<br>ROI %{{y:+.1f}}%"
+                          "<br>First 60%: %{customdata[1]:+.1f}%<br>Last 40%: %{customdata[2]:+.1f}%<extra></extra>"))
+base_layout(f_bt, height=420, barmode="group", showlegend=True, legend=dict(orientation="h", y=1.02, x=0, yanchor="bottom"))
+f_bt.update_yaxes(title="ROI per dollar staked (%)", zeroline=True, zerolinecolor=INK)
+order_sides = list(SIDES)
+f_bt.update_layout(margin=dict(t=90), updatemenus=[dict(
+    type="buttons", direction="right", x=0, y=1.25, xanchor="left", showactive=True, active=order_sides.index(best.side),
     bgcolor="white", bordercolor=GRID, font=dict(size=12),
-    buttons=[dict(label=f"Drop {t}+ pts", method="update",
-                  args=[{"visible": [j == i for j in range(len(thr_list))]}]) for i, t in enumerate(thr_list)])])
+    buttons=[dict(label=SIDES[sd], method="update",
+                  args=[{"visible": [k // traces_per_side == i for k in range(len(SIDES) * traces_per_side)]}])
+             for i, sd in enumerate(order_sides)])])
 
-# equity curves
-f_eq = go.Figure()
-for i, s in enumerate(["NCAAF", "NHL", "NBA", "NFL"]):
-    thr = 10 if s == "NCAAF" else 6
-    d = ev[(ev.sport == s) & (ev.drop_pts >= thr)].sort_values("game_date_et")
-    pnl, _ = fade_pnl(d)
-    f_eq.add_trace(go.Scatter(x=d.game_date_et, y=pnl.cumsum(), mode="lines", visible=(i == 0),
-                              line=dict(color=ACCENT2, width=2.5), name=s,
-                              hovertemplate="%{x|%b %d, %Y}<br>%{y:+.2f} units<extra></extra>"))
-base_layout(f_eq, height=340)
-f_eq.add_hline(y=0, line_color=MUTED, line_dash="dash")
-f_eq.update_yaxes(title="Cumulative profit (units of $1 contracts)")
-f_eq.update_layout(margin=dict(t=50), updatemenus=[dict(
-    type="buttons", direction="right", x=0, y=1.18, xanchor="left", bgcolor="white", bordercolor=GRID, font=dict(size=12),
-    buttons=[dict(label=lab, method="update", args=[{"visible": [j == i for j in range(4)]}])
-             for i, lab in enumerate(["NCAAF, 10+", "NHL, 6+", "NBA, 6+", "NFL, 6+"])])])
+# sample portfolio chart
+f_port = go.Figure()
+f_port.add_trace(go.Scatter(x=pd_best.game_date_et, y=pd_best.bankroll, mode="lines", line=dict(color=ACCENT2, width=2.5),
+                            customdata=np.stack([pd_best.marked_down_team, pd_best.opponent], axis=1),
+                            hovertemplate="%{x|%b %d, %Y}<br>Bankroll $%{y:,.2f}<br>%{customdata[0]} vs %{customdata[1]}<extra></extra>"))
+f_port.add_hline(y=START, line_dash="dash", line_color=MUTED, annotation_text="$100 start", annotation_position="bottom right")
+f_port.add_vline(x=cut_date, line_dash="dot", line_color=MUTED)
+f_port.add_annotation(x=cut_date, y=1, yref="paper", text="Holdout starts", showarrow=False, xanchor="left", xshift=6, font=dict(size=11, color=MUTED))
+base_layout(f_port, height=340)
+f_port.update_yaxes(title="Bankroll ($)", tickprefix="$")
 
 # college: edge by drop band
 bands = [(0, 3, "0 to 3"), (3, 6, "3 to 6"), (6, 10, "6 to 10"), (10, 101, "10+")]
@@ -255,9 +325,11 @@ def table(df, cols, fmts, cls=""):
 
 pct = lambda v: f"{v:.1%}"
 bt_tab = bt.copy()
-bt_tab["rule"] = bt_tab.apply(lambda r: f"{r.sport}, drop {int(r.thr)}+", axis=1)
+bt_tab["rule"] = bt_tab.apply(lambda r: ("★ " if (r.sport == best.sport and r.thr == best.thr and r.side == best.side) else "")
+                              + f"{r.sport}, drop {int(r.thr)}+", axis=1)
+bt_tab["dir"] = bt_tab.side.map(SIDES)
 t_bt = table(bt_tab.sort_values("roi", ascending=False),
-             {"rule": "Rule", "n": "Bets", "roi": "ROI", "first": "First 60%", "last": "Last 40%"},
+             {"rule": "Rule", "dir": "Bet", "n": "Bets", "roi": "ROI", "first": "First 60%", "last": "Last 40%"},
              {"n": lambda v: f"{int(v):,}", "roi": lambda v: f"{v:+.1%}", "first": lambda v: f"{v:+.1%}", "last": lambda v: f"{v:+.1%}"})
 nfl_t = nfl.assign(move=(nfl.price_start - nfl.price_144h) * 100, res=np.where(nfl.won == 1, "Won", "Lost"))
 t_nfl = table(nfl_t.sort_values("move"),
@@ -268,10 +340,6 @@ col_t = col.assign(res=np.where(col.won == 1, "Won", "Lost"), date=col.date.asty
 t_col = table(col_t.sort_values("move_pts"), {"date": "Date", "sport": "Sport", "team": "Team", "opp": "Opponent",
               "players": "Star out", "star_profile": "Profile", "price_ref": "Before", "price_start": "At start", "move_pts": "Move (pts)", "res": "Result"},
               {"price_ref": pct, "price_start": pct, "move_pts": lambda v: f"{v:+.1f}"}, cls="search2")
-nhl = bt[(bt.sport == "NHL") & (bt.thr == 6)].iloc[0]
-cf = bt[(bt.sport == "NCAAF") & (bt.thr == 10)].iloc[0]
-nfl_bt = bt[(bt.sport == "NFL") & (bt.thr == 6)].iloc[0]
-nba_bt = bt[(bt.sport == "NBA") & (bt.thr == 6)].iloc[0]
 ncaaf, ncaam = by_sport.set_index("sport").loc["NCAAF"], by_sport.set_index("sport").loc["NCAAM"]
 nhl_s = by_sport.set_index("sport").loc["NHL"]
 
@@ -321,12 +389,23 @@ footer {{ margin-top:72px; font-size:13px; color:var(--muted); border-top:1px so
 <header>
   <div class="kicker">Kalshi game markets, 2025 to Nov 2026</div>
   <h1>Do markets overreact when a star gets hurt?</h1>
-  <p class="lede">No. In {star_tot['n']:,} games where a statistically defined star did not play, the injured team's Kalshi price fell
-  only {abs(star_tot['move']):.1f} points on average, and those teams won {star_tot['win']:.1%} of the time against {star_tot['p_start']:.1%}
-  implied by their final price. The market does not overreact: backing the injured team returns {star_tot['back_roi']:+.1%} after fees,
-  and betting against it roughly breaks even ({star_tot['fade_roi']:+.1%}).</p>
+  <p class="lede"><b>The thesis:</b> when a star is ruled out, prediction markets and sportsbooks overreact, so the injured team becomes
+  undervalued. If that is true, it should win more often than its post-news price implies and cover the spread more than the 52.4% needed
+  to profit at standard odds.</p>
 </header>
 
+<div class="card">
+  <h3>The motivating case: Miami at Notre Dame, Nov 7 2026</h3>
+  <p>Malachi Toney was ruled out Wednesday, Nov 4. The spread moved from Notre Dame −3.5 at open to −7 and −8.5 after the news, and Miami's
+  Kalshi price fell from about 40% to 29.5%. Notre Dame won 31 to 24: a push at −7, a Miami cover at −8.5, and a result well inside what the
+  closing price allowed.</p>
+  {html_fig(f_mia, "mia")}
+</div>
+
+<h2>What the data says</h2>
+<p class="note">In {star_tot['n']:,} games where a statistically defined star did not play, the injured team's price fell only
+{abs(star_tot['move']):.1f} points on average, and those teams won {star_tot['win']:.1%} of the time against {star_tot['p_start']:.1%}
+implied by their final price. The market did not overreact.</p>
 <div class="tiles">
   <div class="tile"><div class="v">{star_tot['n']:,}</div><div class="l">Games with a star out (NFL, NCAAF, NCAAM)</div></div>
   <div class="tile"><div class="v">{star_tot['move']:+.1f}</div><div class="l">Avg price move, points</div></div>
@@ -337,7 +416,7 @@ footer {{ margin-top:72px; font-size:13px; color:var(--muted); border-top:1px so
 
 <h2>Star players ruled out</h2>
 <p class="note">Only games where a star is confirmed missing: NFL injury reports, and college box scores with no line for the star.
-Right of zero would mean the market overreacted (the original thesis). Lines are 95% intervals.</p>
+Right of zero would mean the market overreacted. Lines are 95% intervals.</p>
 <div class="grid">
   <div class="card"><h3>Injured team: win rate minus price at start</h3><p>Games where both teams were missing a star are left out.</p>{html_fig(f_star, "star")}</div>
   <div class="card"><h3>NFL star-out games</h3><p>QB or skill star listed Out or Doubtful with no stat line.</p><div class="tbox">{t_nfl}</div></div>
@@ -346,33 +425,38 @@ Right of zero would mean the market overreacted (the original thesis). Lines are
 <p>NCAAF and NCAAM stars with no box-score line in a game their team played.</p>
 <input type="search" id="q2" placeholder="Filter by team, player or sport" aria-label="Filter college table"><div class="tbox">{t_col}</div></div>
 
-<h2>The motivating case: Miami at Notre Dame</h2>
-<div class="card"><h3>Kalshi price for Miami to win, hourly</h3>
-<p>Malachi Toney was ruled out Wednesday, Nov 4. Notre Dame won 31 to 24, a result well inside what the 29.5% closing price allowed.</p>
-{html_fig(f_mia, "mia")}</div>
-
 <h2>All pre-game price moves, for any reason</h2>
 <p class="note">A broader check that does not depend on injury data: every game where a team's price fell before the start, whatever the
-cause (injuries, lineups, rest, goalie or pitcher news, or traders correcting an early price). Across {len(ev):,} games with a traded price
-before the news, the {head['n']:,} teams that fell 6+ points won {head['win']:.1%} against {head['p_start']:.1%} priced.</p>
+cause (injuries, lineups, rest, goalie or pitcher news, or traders correcting an early price), at the same three drop levels as the
+backtest. The ringed marker on the left chart is the rule with the best backtest ROI ({best_label}).</p>
 <div class="grid">
-  <div class="card"><h3>Teams that fell 6+ points</h3><p>Price before = 6 days out for NFL and NCAAF, 72 hours out elsewhere.</p>{html_fig(f_edge, "edge")}</div>
-  <div class="card"><h3>Drops in the final 24 hours only</h3><p>When injury and lineup news usually lands. Drops of 5+ points.</p>{html_fig(f_late, "late")}</div>
+  <div class="card"><h3>Teams that fell 6, 10 or 15+ points</h3><p>Price before = 6 days out for NFL and NCAAF, 72 hours out elsewhere.</p>{html_fig(f_edge, "edge")}</div>
+  <div class="card"><h3>Drops in the final 24 hours only</h3><p>When injury and lineup news usually lands. Levels with fewer than 10 games are left off.</p>{html_fig(f_late, "late")}</div>
 </div>
 
-<h2>Backtest: bet against teams after a price drop</h2>
-<p class="note">Rule: when a team's Kalshi price falls by the threshold, buy its opponent in the last hour before the start,
-paying 1 cent over the midpoint plus Kalshi's taker fee (0.07 × P × (1 minus P)). The first 60% of games and the last 40% are shown
-separately as a holdout check.</p>
-<div class="grid">
-  <div class="card"><h3>ROI by sport</h3>{html_fig(f_bt, "bt")}</div>
-  <div class="card"><h3>Cumulative profit, in date order</h3>{html_fig(f_eq, "eq")}</div>
+<h2>Backtest</h2>
+<p class="note">Each bar is one rule: when a team's Kalshi price falls by the drop level, buy one side in the last hour before the start,
+paying 1 cent over the midpoint plus Kalshi's taker fee (0.07 × P × (1 minus P)). Use the buttons to switch between betting against the
+dropped team and backing it. The outlined bar (★) is the best rule with at least {MIN_BETS} bets.</p>
+<div class="card"><h3>ROI by sport, all three drop levels</h3>{html_fig(f_bt, "bt")}</div>
+<div class="verdict"><b>The model, restated.</b> {SIDES[best.side]} when its price falls {int(best.thr)}+ points before the game, in
+{best.sport}: buy {'the opponent' if best.side == 'fade' else 'the dropped team'} in the final hour at the start price. Over {int(best.n):,}
+bets this returned {best.roi:+.1%} per dollar ({best['first']:+.1%} in the first 60% of games, {best['last']:+.1%} in the last 40%).
+Flipping the direction does not make the other rules profitable: every bet pays the spread and the fee, so both sides lose in
+{int((bt.roi <= 0).sum())} of {len(bt)} rules. The best rule was picked after seeing all {len(bt)} results, so expect less going forward.
+This is research, not financial advice.</div>
+<div class="card"><h3>Every rule tested, both directions</h3><div class="tbox">{t_bt}</div></div>
+
+<h2>Sample portfolio: $100 on the best rule</h2>
+<p class="note">Start with $100 on {pd_best.game_date_et.min():%b %d, %Y} and bet {STAKE:.0%} of the current bankroll on every qualifying game in
+date order ({best_label}). Profits and losses compound. Same prices, spread and fees as the backtest.</p>
+<div class="tiles">
+  <div class="tile"><div class="v">${port['final']:,.2f}</div><div class="l">Ending bankroll from $100</div></div>
+  <div class="tile"><div class="v" style="color:var({'--good' if port['final'] >= START else '--bad'})">{port['final'] / START - 1:+.1%}</div><div class="l">Total return</div></div>
+  <div class="tile"><div class="v">{port['bets']:,}</div><div class="l">Bets ({port['wins']:,} won)</div></div>
+  <div class="tile"><div class="v" style="color:var(--bad)">{port['max_dd']:.1%}</div><div class="l">Worst drop from a peak</div></div>
 </div>
-<div class="verdict"><b>Verdict.</b> No rule clears the bar. Fading NCAAF teams after a 10+ point drop returns {cf.roi:+.1%}
-({int(cf.n):,} bets), and NHL at 6+ returns {nhl.roi:+.1%}. NBA at 6+ about breaks even ({nba_bt.roi:+.1%} on {int(nba_bt.n)} bets), and
-NFL at 6+ shows {nfl_bt.roi:+.1%} on just {int(nfl_bt.n)} bets, too few to trust. Fading the injured team in star-out games returns
-{star_tot['fade_roi']:+.1%}. The closing price already reflects the news. This is research, not financial advice.</div>
-<div class="card"><h3>Every rule tested</h3><div class="tbox">{t_bt}</div></div>
+<div class="card"><h3>Bankroll over time</h3><p>The dotted line marks where the last 40% of games (the holdout) begins.</p>{html_fig(f_port, "port")}</div>
 
 <h2>College price moves in detail</h2>
 <p class="note">NCAAF: {int(ncaaf.n):,} teams that fell 6+ won {ncaaf.win:.1%} vs {ncaaf.p_start:.1%} priced.
