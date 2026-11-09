@@ -227,6 +227,14 @@ nfl_clean = nfl[~nfl.both_out.astype(bool)] if "both_out" in nfl else nfl
 star = pd.DataFrame([star_row("NFL", nfl_clean, "price_144h"),
                      star_row("NCAAF", col[col.sport == "NCAAF"], "price_ref"),
                      star_row("NCAAM", col[col.sport == "NCAAM"], "price_ref")])
+_sx = pd.concat([nfl_clean.rename(columns={"price_144h": "price_ref"})[["price_ref", "price_start", "won"]],
+                 col[["price_ref", "price_start", "won"]]])
+_sx = _sx[_sx.price_start.between(0.02, 0.98)]
+star_tot = dict(n=len(_sx), win=_sx.won.mean(), p_start=_sx.price_start.mean(),
+                move=(_sx.dropna(subset=["price_ref"]).price_start - _sx.dropna(subset=["price_ref"]).price_ref).mean() * 100,
+                fade_roi=fade_roi(_sx), back_roi=None)
+_a = (_sx.price_start + 0.01).clip(upper=0.99); _f = 0.07 * _a * (1 - _a)
+star_tot["back_roi"] = ((_sx.won - _a - _f).sum() / (_a + _f).sum())
 f_star = dot_ci(star, "edge", "lo", "hi", 0, lambda v: f"{v:+.1f}", "Win rate minus price at start (points)",
                 label=lambda r: f"{r.sport} ({r.n:,})")
 
@@ -256,17 +264,11 @@ t_nfl = table(nfl_t.sort_values("move"),
               {"game_id": "Game", "team": "Team", "players": "Star out", "tier": "Tier", "price_144h": "6 days before",
                "price_start": "At start", "move": "Move (pts)", "res": "Result", "score": "Score"},
               {"price_144h": pct, "price_start": pct, "move": lambda v: f"{v:+.1f}"})
-top = ev[(ev.drop_pts >= 15) & (ev.pregame_contracts >= 5000)].sort_values("drop_pts", ascending=False).head(60).assign(
-    date=lambda d: d.game_date_et.dt.strftime("%Y-%m-%d"), res=lambda d: np.where(d.won == 1, "Won", "Lost"))
-t_top = table(top, {"date": "Date", "sport": "Sport", "marked_down_team": "Marked-down team", "opponent": "Opponent",
-                    "price_ref": "Before", "price_start": "At start", "drop_pts": "Drop (pts)", "res": "Result"},
-              {"price_ref": pct, "price_start": pct, "drop_pts": lambda v: f"{v:.1f}"}, cls="search")
-
-nhl = bt[(bt.sport == "NHL") & (bt.thr == 6)].iloc[0]
 col_t = col.assign(res=np.where(col.won == 1, "Won", "Lost"), date=col.date.astype(str))
-t_col = table(col_t.sort_values(["sport", "date"]), {"date": "Date", "sport": "Sport", "team": "Team", "opp": "Opponent",
+t_col = table(col_t.sort_values("move_pts"), {"date": "Date", "sport": "Sport", "team": "Team", "opp": "Opponent",
               "players": "Star out", "star_profile": "Profile", "price_ref": "Before", "price_start": "At start", "move_pts": "Move (pts)", "res": "Result"},
               {"price_ref": pct, "price_start": pct, "move_pts": lambda v: f"{v:+.1f}"}, cls="search2")
+nhl = bt[(bt.sport == "NHL") & (bt.thr == 6)].iloc[0]
 cf = bt[(bt.sport == "NCAAF") & (bt.thr == 10)].iloc[0]
 nfl_bt = bt[(bt.sport == "NFL") & (bt.thr == 6)].iloc[0]
 nba_bt = bt[(bt.sport == "NBA") & (bt.thr == 6)].iloc[0]
@@ -319,27 +321,46 @@ footer {{ margin-top:72px; font-size:13px; color:var(--muted); border-top:1px so
 <header>
   <div class="kicker">Kalshi game markets, 2025 to Nov 2026</div>
   <h1>Do markets overreact when a star gets hurt?</h1>
-  <p class="lede">No. Across {len(ev):,} settled games in six sports, the {head['n']:,} teams whose price fell 6 or more points
-  before kickoff won {head['win']:.1%} of the time, against {head['p_start']:.1%} implied by their final price. If anything
-  the market moves slightly too little, and no sport shows an edge that survives fees and a holdout test.</p>
+  <p class="lede">No. In {star_tot['n']:,} games where a statistically defined star did not play, the injured team's Kalshi price fell
+  only {abs(star_tot['move']):.1f} points on average, and those teams won {star_tot['win']:.1%} of the time against {star_tot['p_start']:.1%}
+  implied by their final price. The market does not overreact: backing the injured team returns {star_tot['back_roi']:+.1%} after fees,
+  and betting against it roughly breaks even ({star_tot['fade_roi']:+.1%}).</p>
 </header>
 
 <div class="tiles">
-  <div class="tile"><div class="v">{len(ev):,}</div><div class="l">Games with a traded price before the news</div></div>
-  <div class="tile"><div class="v">{head['n']:,}</div><div class="l">Teams marked down 6+ pts</div></div>
-  <div class="tile"><div class="v">{head['win']:.1%}</div><div class="l">How often they won</div></div>
-  <div class="tile"><div class="v">{head['p_start']:.1%}</div><div class="l">Implied by price at start</div></div>
-  <div class="tile"><div class="v" style="color:var(--bad)">{head['back_roi']:+.1%}</div><div class="l">ROI backing them, after fees</div></div>
+  <div class="tile"><div class="v">{star_tot['n']:,}</div><div class="l">Games with a star out (NFL, NCAAF, NCAAM)</div></div>
+  <div class="tile"><div class="v">{star_tot['move']:+.1f}</div><div class="l">Avg price move, points</div></div>
+  <div class="tile"><div class="v">{star_tot['win']:.1%}</div><div class="l">How often the injured team won</div></div>
+  <div class="tile"><div class="v">{star_tot['p_start']:.1%}</div><div class="l">Implied by price at start</div></div>
+  <div class="tile"><div class="v" style="color:var(--bad)">{star_tot['back_roi']:+.1%}</div><div class="l">ROI backing the injured team</div></div>
 </div>
 
-<h2>Did marked-down teams beat their final price?</h2>
-<p class="note">Right of zero would mean the market overreacted (the original thesis). Lines are 95% intervals. College sports in orange.</p>
+<h2>Star players ruled out</h2>
+<p class="note">Only games where a star is confirmed missing: NFL injury reports, and college box scores with no line for the star.
+Right of zero would mean the market overreacted (the original thesis). Lines are 95% intervals.</p>
 <div class="grid">
-  <div class="card"><h3>All pre-game drops of 6+ points</h3><p>Price before = 6 days out for NFL and NCAAF, 72 hours out elsewhere.</p>{html_fig(f_edge, "edge")}</div>
-  <div class="card"><h3>Late news only: drops in the final 24 hours</h3><p>When injury and lineup news usually lands. Drops of 5+ points.</p>{html_fig(f_late, "late")}</div>
+  <div class="card"><h3>Injured team: win rate minus price at start</h3><p>Games where both teams were missing a star are left out.</p>{html_fig(f_star, "star")}</div>
+  <div class="card"><h3>NFL star-out games</h3><p>QB or skill star listed Out or Doubtful with no stat line.</p><div class="tbox">{t_nfl}</div></div>
+</div>
+<div class="card" style="margin-top:16px"><h3>College star-out games, biggest price moves first</h3>
+<p>NCAAF and NCAAM stars with no box-score line in a game their team played.</p>
+<input type="search" id="q2" placeholder="Filter by team, player or sport" aria-label="Filter college table"><div class="tbox">{t_col}</div></div>
+
+<h2>The motivating case: Miami at Notre Dame</h2>
+<div class="card"><h3>Kalshi price for Miami to win, hourly</h3>
+<p>Malachi Toney was ruled out Wednesday, Nov 4. Notre Dame won 31 to 24, a result well inside what the 29.5% closing price allowed.</p>
+{html_fig(f_mia, "mia")}</div>
+
+<h2>All pre-game price moves, for any reason</h2>
+<p class="note">A broader check that does not depend on injury data: every game where a team's price fell before the start, whatever the
+cause (injuries, lineups, rest, goalie or pitcher news, or traders correcting an early price). Across {len(ev):,} games with a traded price
+before the news, the {head['n']:,} teams that fell 6+ points won {head['win']:.1%} against {head['p_start']:.1%} priced.</p>
+<div class="grid">
+  <div class="card"><h3>Teams that fell 6+ points</h3><p>Price before = 6 days out for NFL and NCAAF, 72 hours out elsewhere.</p>{html_fig(f_edge, "edge")}</div>
+  <div class="card"><h3>Drops in the final 24 hours only</h3><p>When injury and lineup news usually lands. Drops of 5+ points.</p>{html_fig(f_late, "late")}</div>
 </div>
 
-<h2>Backtest: fade the marked-down team</h2>
+<h2>Backtest: bet against teams after a price drop</h2>
 <p class="note">Rule: when a team's Kalshi price falls by the threshold, buy its opponent in the last hour before the start,
 paying 1 cent over the midpoint plus Kalshi's taker fee (0.07 × P × (1 minus P)). The first 60% of games and the last 40% are shown
 separately as a holdout check.</p>
@@ -347,38 +368,19 @@ separately as a holdout check.</p>
   <div class="card"><h3>ROI by sport</h3>{html_fig(f_bt, "bt")}</div>
   <div class="card"><h3>Cumulative profit, in date order</h3>{html_fig(f_eq, "eq")}</div>
 </div>
-<div class="verdict"><b>Verdict.</b> No rule clears the bar. Once stale opening prices are filtered out, fading teams after a 10+ point
-drop in NCAAF returns {cf.roi:+.1%} ({int(cf.n):,} bets), and NHL at 6+ returns {nhl.roi:+.1%}. NBA at 6+ about breaks even ({nba_bt.roi:+.1%} on {int(nba_bt.n)} bets), and
-NFL at 6+ shows {nfl_bt.roi:+.1%} on just {int(nfl_bt.n)} bets, too few to trust. The closing price already reflects the news.
-This is research, not financial advice.</div>
+<div class="verdict"><b>Verdict.</b> No rule clears the bar. Fading NCAAF teams after a 10+ point drop returns {cf.roi:+.1%}
+({int(cf.n):,} bets), and NHL at 6+ returns {nhl.roi:+.1%}. NBA at 6+ about breaks even ({nba_bt.roi:+.1%} on {int(nba_bt.n)} bets), and
+NFL at 6+ shows {nfl_bt.roi:+.1%} on just {int(nfl_bt.n)} bets, too few to trust. Fading the injured team in star-out games returns
+{star_tot['fade_roi']:+.1%}. The closing price already reflects the news. This is research, not financial advice.</div>
 <div class="card"><h3>Every rule tested</h3><div class="tbox">{t_bt}</div></div>
 
-<h2>College football and college basketball</h2>
-<p class="note">NCAAF: {int(ncaaf.n):,} teams marked down 6+ won {ncaaf.win:.1%} vs {ncaaf.p_start:.1%} priced.
+<h2>College price moves in detail</h2>
+<p class="note">NCAAF: {int(ncaaf.n):,} teams that fell 6+ won {ncaaf.win:.1%} vs {ncaaf.p_start:.1%} priced.
 NCAAM: {int(ncaam.n):,} teams won {ncaam.win:.1%} vs {ncaam.p_start:.1%}. College prices hold up as well as the pros.</p>
 <div class="grid">
   <div class="card"><h3>Edge by size of drop</h3><p>Bars show 95% intervals.</p>{html_fig(f_band, "band")}</div>
   <div class="card"><h3>Are college closing prices calibrated?</h3><p>Points on the dashed line mean prices matched results.</p>{html_fig(f_cal, "cal")}</div>
 </div>
-
-<h2>The motivating case: Miami at Notre Dame</h2>
-<div class="card"><h3>Kalshi price for Miami to win, hourly</h3>
-<p>Malachi Toney was ruled out Wednesday, Nov 4. Notre Dame won 31 to 24, a result well inside what the 29.5% closing price allowed.</p>
-{html_fig(f_mia, "mia")}</div>
-
-<h2>Star players ruled out</h2>
-<p class="note">Games where a statistically defined star did not play, using NFL injury reports and college box scores. The market moves
-only about 2 to 3 points on these games, and the injured teams win slightly less often than their closing price implies.</p>
-<div class="grid">
-  <div class="card"><h3>Injured team: win rate minus price at start</h3><p>Games where both teams were missing a star are left out. 95% intervals.</p>{html_fig(f_star, "star")}</div>
-  <div class="card"><h3>NFL star-out games</h3><p>QB or skill star listed Out or Doubtful with no stat line.</p><div class="tbox">{t_nfl}</div></div>
-</div>
-<div class="card" style="margin-top:16px"><h3>College star-out games</h3><p>NCAAF and NCAAM stars with no box-score line in a game their team played.</p>
-<input type="search" id="q2" placeholder="Filter by team, player or sport" aria-label="Filter college table"><div class="tbox">{t_col}</div></div>
-
-<h2>Biggest pre-game drops</h2>
-<div class="card"><p>Teams marked down 15+ points in markets with at least 5,000 contracts traded before the start.</p><input type="search" id="q" placeholder="Filter by team or sport" aria-label="Filter table">
-<div class="tbox">{t_top}</div></div>
 
 <h2>Definitions and method</h2>
 <div class="card"><dl>
@@ -390,7 +392,7 @@ the team in scrimmage yards per game at 70+, each over 3+ prior games. Out = no 
 <dt>Star player (NCAAM)</dt><dd>In his team's top two for minutes per game and averaging 12+ points, over 5+ prior games played (and at least half the team's games).
 Out = no minutes in a game his team played, after playing in one of the team's previous 5 games. A box score confirms the absence, not always its cause.</dd>
 <dt>Star-out event (NFL)</dt><dd>The star is listed Out or Doubtful on the final weekly injury report and has no stat line that week.</dd>
-<dt>Marked-down team (all sports)</dt><dd>The side whose Kalshi price fell between the reference time and the start. Captures injuries plus any other
+<dt>Price drop (all sports)</dt><dd>The side whose Kalshi price fell between the reference time and the start. Not limited to injuries: it captures any other
 pre-game news (lineups, rest, starting goalie or pitcher).</dd>
 <dt>Price before the news</dt><dd>6 days before start for NFL and NCAAF, 72 hours for other sports. It must rest on at least 100 contracts traded; if not,
 the first hour that reaches 100 contracts is used (at least 12 hours before start), otherwise the game is left out. This removes stale opening
@@ -414,11 +416,6 @@ const q2 = document.getElementById('q2');
 q2 && q2.addEventListener('input', () => {{
   const s = q2.value.toLowerCase();
   document.querySelectorAll('table.search2 tbody tr').forEach(tr => tr.hidden = !tr.textContent.toLowerCase().includes(s));
-}});
-const q = document.getElementById('q');
-q && q.addEventListener('input', () => {{
-  const s = q.value.toLowerCase();
-  document.querySelectorAll('table.search tbody tr').forEach(tr => tr.hidden = !tr.textContent.toLowerCase().includes(s));
 }});
 </script>
 </body></html>"""
