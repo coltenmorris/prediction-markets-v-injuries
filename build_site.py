@@ -11,11 +11,7 @@ import plotly.graph_objects as go
 from scipy.stats import norm
 
 ROOT = Path(__file__).parent
-# CSVs normally live in data/, but fall back to the repo root (web uploads sometimes flatten folders)
-DATA = ROOT / "data" if (ROOT / "data" / "events.csv").exists() else ROOT
-for _f in ("events.csv", "games.csv", "nfl_star_out.csv", "miami_nd_path.csv"):
-    if not (DATA / _f).exists():
-        raise SystemExit(f"Missing {_f}: upload the four CSV files into a folder named data/ (or the repo root).")
+DATA = ROOT / "data"
 OUT = ROOT / "site"
 ORDER = ["NCAAF", "NCAAM", "NFL", "NBA", "NHL", "MLB"]
 INK, MUTED, GRID = "#1d2a3a", "#8a94a3", "#e6e9ee"
