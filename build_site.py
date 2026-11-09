@@ -11,16 +11,23 @@ import plotly.graph_objects as go
 from scipy.stats import norm
 
 ROOT = Path(__file__).parent
-DATA = ROOT / "data"
+# Find each CSV in data/ first, then the repo root (web uploads sometimes flatten folders or mix both).
+def find(name):
+    for d in (ROOT / "data", ROOT):
+        if (d / name).exists():
+            return d / name
+    raise SystemExit(f"Missing {name}: upload it into data/ (or the repo root).")
+
 OUT = ROOT / "site"
 ORDER = ["NCAAF", "NCAAM", "NFL", "NBA", "NHL", "MLB"]
 INK, MUTED, GRID = "#1d2a3a", "#8a94a3", "#e6e9ee"
 ACCENT, ACCENT2, BAD, GOOD = "#c2410c", "#0f766e", "#b42318", "#067647"
 
-ev = pd.read_csv(DATA / "events.csv", parse_dates=["game_date_et"])
-games = pd.read_csv(DATA / "games.csv")
-nfl = pd.read_csv(DATA / "nfl_star_out.csv")
-mia = pd.read_csv(DATA / "miami_nd_path.csv")
+ev = pd.read_csv(find("events.csv"), parse_dates=["game_date_et"])
+games = pd.read_csv(find("games.csv"))
+nfl = pd.read_csv(find("nfl_star_out.csv"))
+col = pd.read_csv(find("college_star_out.csv"))
+mia = pd.read_csv(find("miami_nd_path.csv"))
 
 
 # ---------------------------------------------------------------- statistics
@@ -208,6 +215,21 @@ f_mia.update_yaxes(tickformat=".0%", range=[0.2, 0.5], title="Miami win price")
 f_mia.update_xaxes(nticks=9, title="Hour (ET)")
 
 
+# star-out games: NFL (injury reports) and college (box-score absences)
+def star_row(sport, x, ref_col):
+    x = x[x.price_start.between(0.02, 0.98)]
+    n = len(x); w = x.won.mean(); pc = x.price_start.mean(); se = np.sqrt((x.price_start * (1 - x.price_start)).sum()) / n
+    xr = x[x[ref_col].notna()]
+    return dict(sport=sport, n=n, win=w, p_start=pc, edge=(w - pc) * 100, lo=(w - pc - 1.96 * se) * 100,
+                hi=(w - pc + 1.96 * se) * 100, p=2 * (1 - norm.cdf(abs((w - pc) / se))),
+                move=(xr.price_start - xr[ref_col]).mean() * 100, fade_roi=fade_roi(x))
+nfl_clean = nfl[~nfl.both_out.astype(bool)] if "both_out" in nfl else nfl
+star = pd.DataFrame([star_row("NFL", nfl_clean, "price_144h"),
+                     star_row("NCAAF", col[col.sport == "NCAAF"], "price_ref"),
+                     star_row("NCAAM", col[col.sport == "NCAAM"], "price_ref")])
+f_star = dot_ci(star, "edge", "lo", "hi", 0, lambda v: f"{v:+.1f}", "Win rate minus price at start (points)",
+                label=lambda r: f"{r.sport} ({r.n:,})")
+
 # ---------------------------------------------------------------- tables
 def table(df, cols, fmts, cls=""):
     th = "".join(f"<th>{html.escape(c)}</th>" for c in cols.values())
@@ -241,8 +263,13 @@ t_top = table(top, {"date": "Date", "sport": "Sport", "marked_down_team": "Marke
               {"price_ref": pct, "price_start": pct, "drop_pts": lambda v: f"{v:.1f}"}, cls="search")
 
 nhl = bt[(bt.sport == "NHL") & (bt.thr == 6)].iloc[0]
+col_t = col.assign(res=np.where(col.won == 1, "Won", "Lost"), date=col.date.astype(str))
+t_col = table(col_t.sort_values(["sport", "date"]), {"date": "Date", "sport": "Sport", "team": "Team", "opp": "Opponent",
+              "players": "Star out", "star_profile": "Profile", "price_ref": "Before", "price_start": "At start", "move_pts": "Move (pts)", "res": "Result"},
+              {"price_ref": pct, "price_start": pct, "move_pts": lambda v: f"{v:+.1f}"}, cls="search2")
 cf = bt[(bt.sport == "NCAAF") & (bt.thr == 10)].iloc[0]
 nfl_bt = bt[(bt.sport == "NFL") & (bt.thr == 6)].iloc[0]
+nba_bt = bt[(bt.sport == "NBA") & (bt.thr == 6)].iloc[0]
 ncaaf, ncaam = by_sport.set_index("sport").loc["NCAAF"], by_sport.set_index("sport").loc["NCAAM"]
 nhl_s = by_sport.set_index("sport").loc["NHL"]
 
@@ -279,6 +306,7 @@ table {{ width:100%; border-collapse:collapse; font-size:13.5px; font-variant-nu
 th {{ position:sticky; top:0; background:#f1f3f5; text-align:left; font-weight:600; padding:8px 10px; border-bottom:1px solid var(--line); }}
 td {{ padding:7px 10px; border-bottom:1px solid #eef0f3; }}
 td.n {{ text-align:right; }}
+.tbox td, .tbox th {{ white-space:nowrap; }}
 input[type=search] {{ font:inherit; font-size:14px; padding:8px 12px; border:1px solid var(--line); border-radius:8px; width:min(320px,100%); margin-bottom:10px; }}
 dl {{ display:grid; grid-template-columns:minmax(140px,220px) 1fr; gap:10px 20px; font-size:14.5px; }}
 dt {{ font-weight:600; }} dd {{ margin:0; color:#334155; }}
@@ -297,7 +325,7 @@ footer {{ margin-top:72px; font-size:13px; color:var(--muted); border-top:1px so
 </header>
 
 <div class="tiles">
-  <div class="tile"><div class="v">{len(ev):,}</div><div class="l">Settled games analyzed</div></div>
+  <div class="tile"><div class="v">{len(ev):,}</div><div class="l">Games with a traded price before the news</div></div>
   <div class="tile"><div class="v">{head['n']:,}</div><div class="l">Teams marked down 6+ pts</div></div>
   <div class="tile"><div class="v">{head['win']:.1%}</div><div class="l">How often they won</div></div>
   <div class="tile"><div class="v">{head['p_start']:.1%}</div><div class="l">Implied by price at start</div></div>
@@ -319,10 +347,10 @@ separately as a holdout check.</p>
   <div class="card"><h3>ROI by sport</h3>{html_fig(f_bt, "bt")}</div>
   <div class="card"><h3>Cumulative profit, in date order</h3>{html_fig(f_eq, "eq")}</div>
 </div>
-<div class="verdict"><b>Verdict.</b> No rule clears the bar. The best supported is NCAAF at 10+ points (NFL at 6+ shows {nfl_bt.roi:+.1%}, but on only {int(nfl_bt.n)} bets): {int(cf.n):,} bets at {cf.roi:+.1%},
-positive in both halves ({cf['first']:+.1%} then {cf['last']:+.1%}), but it only works when the marked-down team was still the favorite, and
-a result this size could come from chance across the ~20 rules tested. NHL at 6+ points, which looked strong on October to December games
-alone, falls to {nhl.roi:+.1%} over the full season. Treat NCAAF as a hypothesis to paper trade, not a proven edge. This is research, not financial advice.</div>
+<div class="verdict"><b>Verdict.</b> No rule clears the bar. Once stale opening prices are filtered out, fading teams after a 10+ point
+drop in NCAAF returns {cf.roi:+.1%} ({int(cf.n):,} bets), and NHL at 6+ returns {nhl.roi:+.1%}. NBA at 6+ about breaks even ({nba_bt.roi:+.1%} on {int(nba_bt.n)} bets), and
+NFL at 6+ shows {nfl_bt.roi:+.1%} on just {int(nfl_bt.n)} bets, too few to trust. The closing price already reflects the news.
+This is research, not financial advice.</div>
 <div class="card"><h3>Every rule tested</h3><div class="tbox">{t_bt}</div></div>
 
 <h2>College football and college basketball</h2>
@@ -338,13 +366,18 @@ NCAAM: {int(ncaam.n):,} teams won {ncaam.win:.1%} vs {ncaam.p_start:.1%}. Colleg
 <p>Malachi Toney was ruled out Wednesday, Nov 4. Notre Dame won 31 to 24, a result well inside what the 29.5% closing price allowed.</p>
 {html_fig(f_mia, "mia")}</div>
 
-<h2>NFL stars ruled out</h2>
-<div class="card"><p>Star-out games from the NFL table, matched to Kalshi. The price moved only {(nfl.price_start - nfl.price_144h).mean() * 100:+.1f}
-points on average from 6 days out, and these teams won {nfl.won.mean():.1%} against {nfl.price_start.mean():.1%} priced.</p>
-<div class="tbox">{t_nfl}</div></div>
+<h2>Star players ruled out</h2>
+<p class="note">Games where a statistically defined star did not play, using NFL injury reports and college box scores. The market moves
+only about 2 to 3 points on these games, and the injured teams win slightly less often than their closing price implies.</p>
+<div class="grid">
+  <div class="card"><h3>Injured team: win rate minus price at start</h3><p>Games where both teams were missing a star are left out. 95% intervals.</p>{html_fig(f_star, "star")}</div>
+  <div class="card"><h3>NFL star-out games</h3><p>QB or skill star listed Out or Doubtful with no stat line.</p><div class="tbox">{t_nfl}</div></div>
+</div>
+<div class="card" style="margin-top:16px"><h3>College star-out games</h3><p>NCAAF and NCAAM stars with no box-score line in a game their team played.</p>
+<input type="search" id="q2" placeholder="Filter by team, player or sport" aria-label="Filter college table"><div class="tbox">{t_col}</div></div>
 
 <h2>Biggest pre-game drops</h2>
-<div class="card"><p>Teams marked down 15+ points in markets with at least 5,000 contracts traded before the start (thin markets often open at stale prices).</p><input type="search" id="q" placeholder="Filter by team or sport" aria-label="Filter table">
+<div class="card"><p>Teams marked down 15+ points in markets with at least 5,000 contracts traded before the start.</p><input type="search" id="q" placeholder="Filter by team or sport" aria-label="Filter table">
 <div class="tbox">{t_top}</div></div>
 
 <h2>Definitions and method</h2>
@@ -352,24 +385,36 @@ points on average from 6 days out, and these teams won {nfl.won.mean():.1%} agai
 <dt>Star player (NFL)</dt><dd>QB: threw at least 60% of the team's pass attempts in that season's prior games, with at least 3 prior games.
 Skill player: the WR, TE or RB who leads the team in scrimmage yards per game in prior games, averaging at least 70, with at least 3 prior games.
 Fixed before looking at results.</dd>
+<dt>Star player (NCAAF)</dt><dd>Same rule as the NFL from ESPN box scores: the QB with 60%+ of pass attempts, or the non-passer leading
+the team in scrimmage yards per game at 70+, each over 3+ prior games. Out = no box-score line in a game his team played, after appearing in one of the team's previous 3 games.</dd>
+<dt>Star player (NCAAM)</dt><dd>In his team's top two for minutes per game and averaging 12+ points, over 5+ prior games played (and at least half the team's games).
+Out = no minutes in a game his team played, after playing in one of the team's previous 5 games. A box score confirms the absence, not always its cause.</dd>
 <dt>Star-out event (NFL)</dt><dd>The star is listed Out or Doubtful on the final weekly injury report and has no stat line that week.</dd>
 <dt>Marked-down team (all sports)</dt><dd>The side whose Kalshi price fell between the reference time and the start. Captures injuries plus any other
-pre-game news (lineups, rest, starting goalie or pitcher). College has no structured injury feed, so this is the only event definition there.</dd>
+pre-game news (lineups, rest, starting goalie or pitcher).</dd>
+<dt>Price before the news</dt><dd>6 days before start for NFL and NCAAF, 72 hours for other sports. It must rest on at least 100 contracts traded; if not,
+the first hour that reaches 100 contracts is used (at least 12 hours before start), otherwise the game is left out. This removes stale opening
+prices in thin markets, such as a lone 1-contract trade at 97%.</dd>
 <dt>Price</dt><dd>Midpoint of best bid and ask at the end of each hour (last trade if the spread is wider than 10 cents). Start time is Kalshi's
 occurrence time minus 3 hours, confirmed by the price jump at the start of play.</dd>
 <dt>Edge</dt><dd>Actual win rate minus average price at start. Intervals use the variance implied by the prices.</dd>
 <dt>Coverage</dt><dd>Kalshi single-game markets begin with each league's 2025 season, so 2023 and 2024 are not included. Preseason games and prices under 2
 or over 98 cents are excluded.</dd>
 <dt>Data</dt><dd>Kalshi public API (<code>trade-api/v2</code> markets, historical markets, hourly candlesticks), pulled Nov 8 2026. NFL injuries and
-sportsbook lines from nflverse.</dd>
+sportsbook lines from nflverse. College box scores from ESPN via the sportsdataverse project.</dd>
 </dl></div>
 
-<footer>Built with Python and Plotly from the CSVs in <code>data/</code>. Rebuild with <code>python build_site.py</code>.</footer>
+<footer>Last built {pd.Timestamp.now(tz="America/New_York").strftime("%b %d, %Y at %I:%M %p ET")} from {len(ev):,} games. Built with Python and Plotly from the CSVs in <code>data/</code>. Rebuild with <code>python build_site.py</code>.</footer>
 </div>
 <script>
 const fit = () => document.querySelectorAll('.plotly-graph-div').forEach(d => window.Plotly && Plotly.Plots.resize(d));
 window.addEventListener('load', fit);
 window.addEventListener('resize', fit);
+const q2 = document.getElementById('q2');
+q2 && q2.addEventListener('input', () => {{
+  const s = q2.value.toLowerCase();
+  document.querySelectorAll('table.search2 tbody tr').forEach(tr => tr.hidden = !tr.textContent.toLowerCase().includes(s));
+}});
 const q = document.getElementById('q');
 q && q.addEventListener('input', () => {{
   const s = q.value.toLowerCase();
