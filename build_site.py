@@ -198,7 +198,7 @@ def dot_levels(df, xtitle, highlight=None):
 
 
 hl = (best.sport, int(best.thr))
-f_edge = dot_levels(edge_lv, "Win rate minus price at start (points)", hl)
+f_edge = dot_levels(edge_lv, "Win rate minus price at start (points)")
 f_late = dot_levels(late_lv, "Win rate minus price at start (points)")
 
 # backtest: all three drop levels at once, toggle the bet direction, outline the best rule
@@ -324,13 +324,42 @@ def table(df, cols, fmts, cls=""):
 
 
 pct = lambda v: f"{v:.1%}"
-bt_tab = bt.copy()
-bt_tab["rule"] = bt_tab.apply(lambda r: ("★ " if (r.sport == best.sport and r.thr == best.thr and r.side == best.side) else "")
-                              + f"{r.sport}, drop {int(r.thr)}+", axis=1)
-bt_tab["dir"] = bt_tab.side.map(SIDES)
-t_bt = table(bt_tab.sort_values("roi", ascending=False),
-             {"rule": "Rule", "dir": "Bet", "n": "Bets", "roi": "ROI", "first": "First 60%", "last": "Last 40%"},
-             {"n": lambda v: f"{int(v):,}", "roi": lambda v: f"{v:+.1%}", "first": lambda v: f"{v:+.1%}", "last": lambda v: f"{v:+.1%}"})
+# rules table: one row per sport and drop level, the two bet directions side by side
+def rules_table():
+    def cell(v, star=False):
+        if pd.isna(v):
+            return '<td class="n">n/a</td>'
+        cls = "pos" if v > 0 else "neg"
+        return f'<td class="n {cls}{" best" if star else ""}">{"★ " if star else ""}{v:+.1%}</td>'
+    rows = []
+    for sp in ORDER:
+        levels = [t for t in THRS if not bt[(bt.sport == sp) & (bt.thr == t)].empty]
+        for t in levels:
+            r = bt[(bt.sport == sp) & (bt.thr == t)].set_index("side")
+            f, k = r.loc["fade"], r.loc["back"]
+            fb = sp == best.sport and t == best.thr and best.side == "fade"
+            kb = sp == best.sport and t == best.thr and best.side == "back"
+            anypos = int(max(f.roi, k.roi) > 0)
+            end = ' class="grp-end"' if t == levels[-1] else ""
+            rows.append(f'<tr{end} data-sport="{sp}" data-drop="{t}" data-pos="{anypos}">'
+                        f'<td>{sp}</td><td>{t}+ pts</td><td class="n">{int(f.n):,}</td>'
+                        + cell(f.roi, fb) + cell(f["first"]) + cell(f["last"])
+                        + cell(k.roi, kb) + cell(k["first"]) + cell(k["last"]) + '</tr>')
+    sports = [sp for sp in ORDER if sp in set(bt.sport)]
+    opts_s = "".join(f'<option value="{sp}">{sp}</option>' for sp in sports)
+    opts_d = "".join(f'<option value="{t}">{t}+ pts</option>' for t in THRS)
+    controls = (f'<div class="filters">'
+                f'<label>Sport <select id="f-sport"><option value="">All sports</option>{opts_s}</select></label>'
+                f'<label>Drop <select id="f-drop"><option value="">All drops</option>{opts_d}</select></label>'
+                f'<label class="chk"><input type="checkbox" id="f-pos"> Only rules with a positive ROI</label></div>')
+    head = ('<thead><tr><th rowspan="2">Sport</th><th rowspan="2">Drop</th><th rowspan="2" class="n">Bets</th>'
+            '<th colspan="3" class="grp">Bet against the dropped team</th><th colspan="3" class="grp">Back the dropped team</th></tr>'
+            '<tr><th class="n">ROI</th><th class="n">First 60%</th><th class="n">Last 40%</th>'
+            '<th class="n">ROI</th><th class="n">First 60%</th><th class="n">Last 40%</th></tr></thead>')
+    return controls + f'<div class="tbox"><table class="rules">{head}<tbody>{"".join(rows)}</tbody></table></div>'
+
+
+t_bt = rules_table()
 nfl_t = nfl.assign(move=(nfl.price_start - nfl.price_144h) * 100, res=np.where(nfl.won == 1, "Won", "Lost"))
 t_nfl = table(nfl_t.sort_values("move"),
               {"game_id": "Game", "team": "Team", "players": "Star out", "tier": "Tier", "price_144h": "6 days before",
@@ -377,6 +406,17 @@ th {{ position:sticky; top:0; background:#f1f3f5; text-align:left; font-weight:6
 td {{ padding:7px 10px; border-bottom:1px solid #eef0f3; }}
 td.n {{ text-align:right; }}
 .tbox td, .tbox th {{ white-space:nowrap; }}
+table.rules th {{ text-align:right; }} table.rules thead tr:first-child th:nth-child(-n+2) {{ text-align:left; }}
+table.rules thead tr:first-child th {{ top:0; }} table.rules thead tr:nth-child(2) th {{ top:33px; }}
+table.rules th.grp {{ text-align:center; border-bottom:2px solid var(--line); }}
+table.rules td:nth-child(4), table.rules td:nth-child(7), table.rules th.grp + th.grp {{ border-left:2px solid var(--line); }}
+table.rules thead tr:nth-child(2) th:nth-child(1), table.rules thead tr:nth-child(2) th:nth-child(4) {{ border-left:2px solid var(--line); }}
+table.rules tbody tr.grp-end td {{ border-bottom:2px solid var(--line); }}
+td.pos {{ color:var(--good); }} td.neg {{ color:var(--bad); }}
+td.best {{ outline:2.5px solid var(--ink); outline-offset:-3px; font-weight:600; background:#fff7ed; }}
+.filters {{ display:flex; flex-wrap:wrap; gap:12px 20px; align-items:center; margin-bottom:12px; font-size:14px; }}
+.filters select {{ font:inherit; font-size:14px; padding:6px 10px; border:1px solid var(--line); border-radius:8px; background:#fff; margin-left:6px; }}
+.filters .chk {{ display:flex; align-items:center; gap:6px; }}
 input[type=search] {{ font:inherit; font-size:14px; padding:8px 12px; border:1px solid var(--line); border-radius:8px; width:min(320px,100%); margin-bottom:10px; }}
 dl {{ display:grid; grid-template-columns:minmax(140px,220px) 1fr; gap:10px 20px; font-size:14.5px; }}
 dt {{ font-weight:600; }} dd {{ margin:0; color:#334155; }}
@@ -428,7 +468,7 @@ Right of zero would mean the market overreacted. Lines are 95% intervals.</p>
 <h2>All pre-game price moves, for any reason</h2>
 <p class="note">A broader check that does not depend on injury data: every game where a team's price fell before the start, whatever the
 cause (injuries, lineups, rest, goalie or pitcher news, or traders correcting an early price), at the same three drop levels as the
-backtest. The ringed marker on the left chart is the rule with the best backtest ROI ({best_label}).</p>
+backtest.</p>
 <div class="grid">
   <div class="card"><h3>Teams that fell 6, 10 or 15+ points</h3><p>Price before = 6 days out for NFL and NCAAF, 72 hours out elsewhere.</p>{html_fig(f_edge, "edge")}</div>
   <div class="card"><h3>Drops in the final 24 hours only</h3><p>When injury and lineup news usually lands. Levels with fewer than 10 games are left off.</p>{html_fig(f_late, "late")}</div>
@@ -445,7 +485,7 @@ bets this returned {best.roi:+.1%} per dollar ({best['first']:+.1%} in the first
 Flipping the direction does not make the other rules profitable: every bet pays the spread and the fee, so both sides lose in
 {int((bt.roi <= 0).sum())} of {len(bt)} rules. The best rule was picked after seeing all {len(bt)} results, so expect less going forward.
 This is research, not financial advice.</div>
-<div class="card"><h3>Every rule tested, both directions</h3><div class="tbox">{t_bt}</div></div>
+<div class="card"><h3>Every rule tested, both directions</h3><p>Each row is one sport and drop level. ROI is per dollar staked after the spread and fees. ★ marks the best rule with at least {MIN_BETS} bets.</p>{t_bt}</div>
 
 <h2>Sample portfolio: $100 on the best rule</h2>
 <p class="note">Start with $100 on {pd_best.game_date_et.min():%b %d, %Y} and bet {STAKE:.0%} of the current bankroll on every qualifying game in
@@ -496,6 +536,11 @@ sportsbook lines from nflverse. College box scores from ESPN via the sportsdatav
 const fit = () => document.querySelectorAll('.plotly-graph-div').forEach(d => window.Plotly && Plotly.Plots.resize(d));
 window.addEventListener('load', fit);
 window.addEventListener('resize', fit);
+const fS = document.getElementById('f-sport'), fD = document.getElementById('f-drop'), fP = document.getElementById('f-pos');
+const applyRules = () => document.querySelectorAll('table.rules tbody tr').forEach(tr => {{
+  tr.hidden = (fS.value && tr.dataset.sport !== fS.value) || (fD.value && tr.dataset.drop !== fD.value) || (fP.checked && tr.dataset.pos !== '1');
+}});
+[fS, fD, fP].forEach(el => el && el.addEventListener('change', applyRules));
 const q2 = document.getElementById('q2');
 q2 && q2.addEventListener('input', () => {{
   const s = q2.value.toLowerCase();
