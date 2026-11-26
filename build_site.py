@@ -39,6 +39,7 @@ _listed = ev.ticker.map(games.set_index("ticker").hours_listed_before_start)
 _open_junk = (((ev.ref_hours_before_start - _listed).abs() <= 1)
               & (ev.price_ref >= OPEN_PRINT_MIN) & (ev.drop_pts >= OPEN_DROP_MIN))
 artifacts = ev[_open_junk].sort_values("drop_pts", ascending=False)
+ev_all = ev.assign(at_open=(ev.ref_hours_before_start - _listed).abs() <= 1, removed=_open_junk)  # kept for the before/after charts
 ev = ev[~_open_junk].reset_index(drop=True)
 print(f"removed {len(artifacts):,} opening-print artifacts:", artifacts.sport.value_counts().to_dict())
 
@@ -205,7 +206,8 @@ def dot_levels(df, xtitle, highlight=None):
                                      hoverinfo="skip", showlegend=False, cliponaxis=False))
     fig.add_vline(x=0, line_dash="dash", line_color=MUTED)
     base_layout(fig, height=90 + 58 * len(sports), showlegend=True, legend=dict(orientation="h", y=1.08, x=0))
-    fig.update_yaxes(tickvals=list(ypos.values()), ticktext=list(ypos.keys()), range=[-0.6, len(sports) - 0.4], showgrid=False)
+    fig.update_yaxes(tickvals=list(ypos.values()), ticktext=list(ypos.keys()), range=[-0.6, len(sports) - 0.4], showgrid=False,
+                     zeroline=False)
     fig.update_xaxes(title=xtitle)
     return fig
 
@@ -213,6 +215,55 @@ def dot_levels(df, xtitle, highlight=None):
 hl = (best.sport, int(best.thr))
 f_edge = dot_levels(edge_lv, "Win rate minus price at start (points)")
 f_late = dot_levels(late_lv, "Win rate minus price at start (points)")
+
+# fake opening drops: where they sit, and what removing them did to each sport's edge
+_op = ev_all[ev_all.at_open & (ev_all.drop_pts >= 6)]
+f_open = go.Figure()
+f_open.add_shape(type="rect", x0=OPEN_PRINT_MIN, x1=1, y0=0, y1=1, fillcolor=BAD, opacity=0.06, line_width=0, layer="below")
+f_open.add_annotation(x=(OPEN_PRINT_MIN + 1) / 2, y=0.97, text=f"Opened {OPEN_PRINT_MIN:.0%}+", showarrow=False,
+                      font=dict(size=11, color=BAD))
+for lab, d, c, sz, op in [("Kept", _op[~_op.removed], MUTED, 5, 0.35),
+                          ("Thrown out", _op[_op.removed], BAD, 7, 0.75)]:
+    f_open.add_trace(go.Scatter(
+        x=d.price_ref.round(3), y=d.price_start.round(3), mode="markers", name=f"{lab} ({len(d):,})",
+        marker=dict(size=sz, color=c, opacity=op, line_width=0),
+        # full hover text only on the thrown-out points; the kept cloud carries prices alone to keep the page small
+        customdata=np.stack([d.sport, d.marked_down_team, d.opponent, d.drop_pts.round(1)], axis=1) if lab == "Thrown out" else None,
+        hovertemplate=("<b>%{customdata[1]}</b> vs %{customdata[2]} (%{customdata[0]})<br>Opened %{x:.1%}, start %{y:.1%}"
+                       "<br>Drop %{customdata[3]:.1f} pts<extra></extra>") if lab == "Thrown out"
+                      else "Kept<br>Opened %{x:.1%}, start %{y:.1%}<extra></extra>"))
+base_layout(f_open, height=380, showlegend=True, legend=dict(orientation="h", y=1.1, x=0))
+f_open.update_layout(margin=dict(t=50), legend=dict(y=1.02, yanchor="bottom"))
+f_open.update_xaxes(title="Dropped team's opening price", tickformat=".0%", range=[0, 1])
+f_open.update_yaxes(title="Price at start", tickformat=".0%", range=[0, 1])
+
+_aff = [s_ for s_ in ORDER if ev_all[ev_all.sport == s_].removed.any()]
+_ba = []
+for s_ in _aff:
+    for lab, d in [("Before", ev_all), ("After", ev_all[~ev_all.removed])]:
+        x = d[(d.sport == s_) & (d.drop_pts >= 15)]
+        _ba.append(dict(sport=s_, when=lab, **stats(x)))
+_ba = pd.DataFrame(_ba)
+_rm = artifacts.sport.value_counts()
+f_ba = go.Figure()
+_lab = {s_: f"{s_} (−{_rm.get(s_, 0):,})" for s_ in _aff}
+for s_ in _aff:
+    b, a = _ba[(_ba.sport == s_) & (_ba.when == "Before")].iloc[0], _ba[(_ba.sport == s_) & (_ba.when == "After")].iloc[0]
+    f_ba.add_trace(go.Scatter(x=[b.edge, a.edge], y=[_lab[s_]] * 2, mode="lines", line=dict(color=MUTED, width=2),
+                              hoverinfo="skip", showlegend=False))
+for lab, sym, c in [("Before", "circle-open", MUTED), ("After", "circle", ACCENT)]:
+    d = _ba[_ba.when == lab]
+    f_ba.add_trace(go.Scatter(
+        x=d.edge, y=[_lab[s_] for s_ in d.sport], mode="markers", name=f"{lab} removal",
+        marker=dict(size=12, symbol=sym, color=c, line=dict(width=2, color=c)),
+        customdata=np.stack([d.n, d.win * 100, d.p_start * 100, d["drop"]], axis=1),
+        hovertemplate=f"<b>%{{y}}</b>, {lab.lower()} removal<br>%{{customdata[0]:,}} teams fell 15+ (avg %{{customdata[3]:.1f}} pts)"
+                      "<br>Won %{customdata[1]:.1f}% vs priced %{customdata[2]:.1f}%<extra></extra>"))
+f_ba.add_vline(x=0, line_dash="dash", line_color=MUTED)
+base_layout(f_ba, height=380, showlegend=True, legend=dict(orientation="h", y=1.1, x=0))
+f_ba.update_xaxes(title="Win rate minus price (points)")
+f_ba.update_layout(margin=dict(t=50), legend=dict(y=1.02, yanchor="bottom"))
+f_ba.update_yaxes(autorange="reversed", categoryorder="array", categoryarray=[_lab[s_] for s_ in _aff], zeroline=False)
 
 # backtest: all three drop levels at once, toggle the bet direction, outline the best rule
 f_bt = go.Figure()
@@ -483,8 +534,20 @@ Right of zero would mean the market overreacted. Lines are 95% intervals.</p>
 cause (injuries, lineups, rest, goalie or pitcher news, or traders correcting an early price), at the same three drop levels as the
 backtest.</p>
 <div class="grid">
-  <div class="card"><h3>Teams that fell 6, 10 or 15+ points</h3><p>Price before = 6 days out for NFL and NCAAF, 72 hours out elsewhere.</p>{html_fig(f_edge, "edge")}</div>
+  <div class="card"><h3>Teams that fell 6, 10 or 15+ points</h3><p>Price before = 6 days out for NFL and NCAAF, 72 hours out elsewhere. {len(artifacts):,} fake opening drops removed (see below).</p>{html_fig(f_edge, "edge")}</div>
   <div class="card"><h3>Drops in the final 24 hours only</h3><p>When injury and lineup news usually lands. Levels with fewer than 10 games are left off.</p>{html_fig(f_late, "late")}</div>
+</div>
+
+<h3 style="margin-top:28px">Fake drops from 99-cent opening prints</h3>
+<p class="note">When a game first lists, the book often holds nothing but 99-cent asks on both teams, so each side reads 80 to 97%. Measured
+from that first hour, the slide to the real price looks like a collapse. {len(artifacts):,} games where the dropped team opened at
+{OPEN_PRINT_MIN:.0%}+ and fell {OPEN_DROP_MIN}+ points are thrown out of every chart and table on this page
+(<a href="opening_artifacts.csv">list</a>).</p>
+<div class="grid">
+  <div class="card"><h3>Opening price vs price at start</h3><p>Drops of 6+ points measured from the first listed hour. A real
+  {OPEN_PRINT_MIN:.0%} favorite rarely starts the game as an underdog.</p>{html_fig(f_open, "open")}</div>
+  <div class="card"><h3>Edge on 15+ point drops, before and after</h3><p>Sports with games removed (count in brackets). The open
+  circle includes the fake drops.</p>{html_fig(f_ba, "ba")}</div>
 </div>
 
 <h2>Backtest</h2>
@@ -515,7 +578,7 @@ date order ({best_label}). Profits and losses compound. Same prices, spread and 
 <p class="note">NCAAF: {int(ncaaf.n):,} teams that fell 6+ won {ncaaf.win:.1%} vs {ncaaf.p_start:.1%} priced.
 NCAAM: {int(ncaam.n):,} teams won {ncaam.win:.1%} vs {ncaam.p_start:.1%}. College prices hold up as well as the pros.</p>
 <div class="grid">
-  <div class="card"><h3>Edge by size of drop</h3><p>Bars show 95% intervals.</p>{html_fig(f_band, "band")}</div>
+  <div class="card"><h3>Edge by size of drop</h3><p>Bars show 95% intervals. NCAAM excludes {int(_rm.get("NCAAM", 0)):,} fake opening drops.</p>{html_fig(f_band, "band")}</div>
   <div class="card"><h3>Are college closing prices calibrated?</h3><p>Points on the dashed line mean prices matched results.</p>{html_fig(f_cal, "cal")}</div>
 </div>
 
