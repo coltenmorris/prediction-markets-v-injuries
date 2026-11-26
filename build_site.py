@@ -29,6 +29,19 @@ nfl = pd.read_csv(find("nfl_star_out.csv"))
 col = pd.read_csv(find("college_star_out.csv"))
 mia = pd.read_csv(find("miami_nd_path.csv"))
 
+# Opening-print artifacts. When a game is first listed the book is often empty apart from 99-cent asks on BOTH
+# teams, so each side's hourly midpoint reads about 90-97%. Where that opening print is the reference price
+# (most NBA, NCAAM, NHL and MLB games; NFL and NCAAF use 6 days out, after listing), the move to the real price
+# shows up as a huge fake "drop" (e.g. 97% to 6.5%). Throw those events out before any statistics.
+OPEN_PRINT_MIN = 0.90  # dropped team priced at 90%+ in the first hour it was listed ...
+OPEN_DROP_MIN = 15     # ... and then "fell" 15+ points
+_listed = ev.ticker.map(games.set_index("ticker").hours_listed_before_start)
+_open_junk = (((ev.ref_hours_before_start - _listed).abs() <= 1)
+              & (ev.price_ref >= OPEN_PRINT_MIN) & (ev.drop_pts >= OPEN_DROP_MIN))
+artifacts = ev[_open_junk].sort_values("drop_pts", ascending=False)
+ev = ev[~_open_junk].reset_index(drop=True)
+print(f"removed {len(artifacts):,} opening-print artifacts:", artifacts.sport.value_counts().to_dict())
+
 
 # ---------------------------------------------------------------- statistics
 def stats(df: pd.DataFrame) -> dict:
@@ -521,6 +534,11 @@ pre-game news (lineups, rest, starting goalie or pitcher).</dd>
 <dt>Price before the news</dt><dd>6 days before start for NFL and NCAAF, 72 hours for other sports. It must rest on at least 100 contracts traded; if not,
 the first hour that reaches 100 contracts is used (at least 12 hours before start), otherwise the game is left out. This removes stale opening
 prices in thin markets, such as a lone 1-contract trade at 97%.</dd>
+<dt>Opening-print artifacts</dt><dd>When a game first lists, the book often holds only 99-cent asks on both teams, so each side's midpoint
+reads 90 to 97%. Where the price before the news is that very first listed hour, the dropped team was priced at {OPEN_PRINT_MIN:.0%} or more,
+and it then fell {OPEN_DROP_MIN}+ points, the game is thrown out as a fake drop: {len(artifacts):,} games
+({", ".join(f"{s} {n:,}" for s, n in artifacts.sport.value_counts().items())}). The list is in
+<a href="opening_artifacts.csv"><code>opening_artifacts.csv</code></a>.</dd>
 <dt>Price</dt><dd>Midpoint of best bid and ask at the end of each hour (last trade if the spread is wider than 10 cents). Start time is Kalshi's
 occurrence time minus 3 hours, confirmed by the price jump at the start of play.</dd>
 <dt>Edge</dt><dd>Actual win rate minus average price at start. Intervals use the variance implied by the prices.</dd>
@@ -551,4 +569,5 @@ q2 && q2.addEventListener('input', () => {{
 
 OUT.mkdir(exist_ok=True)
 (OUT / "index.html").write_text(page, encoding="utf-8")
+artifacts.to_csv(OUT / "opening_artifacts.csv", index=False)
 print(f"wrote {OUT / 'index.html'} ({len(page) / 1e3:.0f} KB)")
