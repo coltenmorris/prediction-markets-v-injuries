@@ -4,7 +4,7 @@ Do prediction markets overreact when a star player is ruled out? This repo backt
 Kalshi game markets (NFL, NCAAF, NCAAM, NBA, NHL, MLB, 2025 season through Nov 2026) and publishes the results as an
 interactive website built with Python and Plotly.
 
-**Finding:** no. Teams whose price fell 6+ points before the game won 40.1% of the time against 40.8% implied by their
+**Finding:** no. Teams whose price fell 6+ points before the game won 38.9% of the time against 40.1% implied by their
 final price. Fading them (betting the opponent) does not beat Kalshi's fees in any sport over the full sample; the best
 lead, NCAAF at 10+ point drops, is not statistically reliable yet.
 
@@ -37,8 +37,8 @@ python build_site.py
 - **Marked-down team (all sports):** the side whose Kalshi price fell between the reference time (6 days out for NFL and
   NCAAF, 72 hours elsewhere) and the start. This captures injuries plus any other pre-game news.
 - **Opening-print artifacts:** when a game first lists, the book often holds only 99-cent asks on both teams, so each side
-  reads 90-97%. Games whose reference price is that first listed hour, with the dropped team at 90%+ and then falling 15+ points,
-  are thrown out as fake drops (255 games: NCAAM 179, MLB 39, NHL 35, NBA 2; listed in `site/opening_artifacts.csv`).
+  reads 80-97%. Games whose reference price is that first listed hour, with the dropped team at 80%+ and then falling 15+ points,
+  are thrown out as fake drops (558 games: NCAAM 282, MLB 173, NBA 53, NHL 50; listed in `site/opening_artifacts.csv`).
 - **Price:** hourly bid/ask midpoint. **ROI:** buy at the start price plus 1 cent, paying Kalshi's taker fee 0.07 x P x (1 minus P).
 
 Data: Kalshi public API (pulled Nov 8 2026) and nflverse. Research only, not financial advice.
